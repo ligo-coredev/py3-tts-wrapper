@@ -527,6 +527,17 @@ class MicrosoftClient(AbstractTTS):
             if restore_voice and original_voice:
                 self.set_voice(original_voice)
 
+    def get_default_format(self):
+        return "wav", "Riff16Khz16BitMonoPcm"
+
+    def validate_output_format(self, extension, format):
+        # Find the format string
+        valid_formats = [f for ext, f in FORMATS if ext == extension.lower()]
+        if not valid_formats:
+            raise ValueError(f"No formats found for extension '{extension}'.")
+        if format not in valid_formats:
+            raise ValueError(f"Format '{format}' is not valid for extension '{extension}'.")
+
     def synth_to_format_bytes(self, text: Any, extension: str, format: str | None = None, voice_id: str | None = None) -> bytes:
         """Synthesize text to audio bytes in a specific format.
 
