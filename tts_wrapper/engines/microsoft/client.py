@@ -22,8 +22,47 @@ speechsdk = None
 
 Credentials = tuple[str, Optional[str]]
 
-FORMATS = {"wav": "Riff24Khz16BitMonoPcm"}
-
+FORMATS = [
+    ("amr", "AmrWb16000Hz"),
+    ("g722", "G72216Khz64Kbps"),
+    ("mp3", "Audio16Khz16KbpsMonoSiren"),
+    ("mp3", "Audio16Khz32KBitRateMonoMp3"),
+    ("mp3", "Audio16Khz64KBitRateMonoMp3"),
+    ("mp3", "Audio16Khz128KBitRateMonoMp3"),
+    ("mp3", "Audio24Khz48KBitRateMonoMp3"),
+    ("mp3", "Audio24Khz96KBitRateMonoMp3"),
+    ("mp3", "Audio24Khz160KBitRateMonoMp3"),
+    ("mp3", "Audio48Khz96KBitRateMonoMp3"),
+    ("mp3", "Audio48Khz192KBitRateMonoMp3"),
+    ("opus", "Audio16Khz16Bit32KbpsMonoOpus"),
+    ("opus", "Audio24Khz16Bit24KbpsMonoOpus"),
+    ("opus", "Audio24Khz16Bit48KbpsMonoOpus"),
+    ("ogg", "Ogg16Khz16BitMonoOpus"),
+    ("ogg", "Ogg24Khz16BitMonoOpus"),
+    ("ogg", "Ogg48Khz16BitMonoOpus"),
+    ("raw", "Raw8Khz8BitMonoMULaw"),
+    ("raw", "Raw8Khz8BitMonoALaw"),
+    ("raw", "Raw8Khz16BitMonoPcm"),
+    ("raw", "Raw16Khz16BitMonoPcm"),
+    ("raw", "Raw16Khz16BitMonoTrueSilk"),
+    ("raw", "Raw24Khz16BitMonoPcm"),
+    ("raw", "Raw24Khz16BitMonoTrueSilk"),
+    ("raw", "Raw48Khz16BitMonoPcm"),
+    ("raw", "Raw22050Hz16BitMonoPcm"),
+    ("raw", "Raw44100Hz16BitMonoPcm"),
+    ("wav", "Riff8Khz8BitMonoMULaw"),
+    ("wav", "Riff8Khz8BitMonoALaw"),
+    ("wav", "Riff8Khz16BitMonoPcm"),
+    ("wav", "Riff16Khz16KbpsMonoSiren"),
+    ("wav", "Riff16Khz16BitMonoPcm"),
+    ("wav", "Riff24Khz16BitMonoPcm"),
+    ("wav", "Riff48Khz16BitMonoPcm"),
+    ("wav", "Riff22050Hz16BitMonoPcm"),
+    ("wav", "Riff44100Hz16BitMonoPcm"),
+    ("webm", "Webm16Khz16BitMonoOpus"),
+    ("webm", "Webm24Khz16BitMonoOpus"),
+    ("webm", "Webm24Khz16Bit24KbpsMonoOpus"),
+]
 
 class MicrosoftClient(AbstractTTS):
     """Client for Microsoft Azure TTS service."""
@@ -487,6 +526,152 @@ class MicrosoftClient(AbstractTTS):
                 synthesizer.synthesis_word_boundary.disconnect_all()
             if restore_voice and original_voice:
                 self.set_voice(original_voice)
+
+    def synth_to_format_bytes(self, text: Any, extension: str, format: str | None = None, voice_id: str | None = None) -> bytes:
+        """Synthesize text to audio bytes in a specific format.
+
+        This method is only available when using the Speech SDK.
+
+        Args:
+            text: The text to synthesize.
+            extension: The desired audio format extension (e.g., 'mp3', 'wav').
+            format: The specific format string (e.g., 'Audio48Khz192KBitRateMonoMp3').
+                    If not provided, the first available format for the extension is used.
+            voice_id: Optional voice ID to use for this synthesis.
+
+        Returns:
+            Audio bytes in the specified format.
+
+        Raises:
+            RuntimeError: If not using the Speech SDK.
+            ValueError: If the specified extension or format is invalid.
+        """
+        text = str(text)
+
+        if not self._use_speech_sdk:
+            raise RuntimeError("synth_to_format_bytes is only available when using the Speech SDK.")
+
+        # Find the format string
+        valid_formats = [f for ext, f in FORMATS if ext == extension.lower()]
+        if not valid_formats:
+            raise ValueError(f"No formats found for extension '{extension}'.")
+
+        if format:
+            if format not in valid_formats:
+                raise ValueError(f"Format '{format}' is not valid for extension '{extension}'.")
+            target_format = format
+        else:
+            target_format = valid_formats[0]
+
+        speechsdk_module = self._try_import_speechsdk()
+
+        try:
+            output_format_enum = getattr(speechsdk_module.SpeechSynthesisOutputFormat, target_format)
+        except AttributeError:
+            raise ValueError(f"Invalid format string: {target_format}")
+
+        default_format_enum = speechsdk_module.SpeechSynthesisOutputFormat.Riff24Khz16BitMonoPcm
+        self.speech_config.set_speech_synthesis_output_format(output_format_enum)
+
+        try:
+            logging.debug("Using Speech SDK for synthesis with format %s", target_format)
+            self._word_timings = []
+            
+            original_voice = None
+            restore_voice = False
+            if voice_id:
+                original_voice = self.speech_config.speech_synthesis_voice_name
+                self.set_voice(voice_id)
+                restore_voice = True
+
+            word_timings = []
+
+            def handle_word_boundary(evt):
+                logging.debug(
+                    "Word boundary event: %s, offset: %s, duration: %s",
+                    evt.text,
+                    evt.audio_offset,
+                    evt.duration,
+                )
+
+                if evt.text and not evt.text.isspace():
+                    logging.debug("Condition met, adding word timing")
+                    # Convert to seconds, handling potential timedelta objects
+                    start_time = self._convert_to_seconds(evt.audio_offset)
+                    duration = self._convert_to_seconds(evt.duration)
+                    end_time = start_time + duration  # Calculate end time
+
+                    # Create the timing tuple
+                    timing = (start_time, end_time, evt.text)
+                    logging.debug("Created timing tuple: %s", timing)
+
+                    # Append to the list
+                    word_timings.append(timing)
+                    logging.debug(
+                        "Added word timing: %s, start: %s, end: %s",
+                        evt.text,
+                        start_time,
+                        end_time,
+                    )
+                    logging.debug("Current word_timings: %s", word_timings)
+                    logging.debug("Current word_timings length: %d", len(word_timings))
+
+            try:
+                synthesizer = speechsdk_module.SpeechSynthesizer(speech_config=self.speech_config, audio_config=None)
+                synthesizer.synthesis_word_boundary.connect(handle_word_boundary)
+
+                if self._is_ssml(text):
+                    if 'xmlns="http://www.w3.org/2001/10/synthesis"' not in text and "xml:lang=" not in text:
+                        import re
+                        match = re.search(r"<speak>(.*?)</speak>", text, re.DOTALL)
+                        if match:
+                            inner_content = match.group(1)
+                            voice_name = self.speech_config.speech_synthesis_voice_name
+                            text = (
+                                '<speak xmlns="http://www.w3.org/2001/10/synthesis" '
+                                'version="1.0" xml:lang="en-US">'
+                                f'<voice name="{voice_name}">{inner_content}</voice></speak>'
+                            )
+                        else:
+                            text = text.replace("<speak>", '<speak xmlns="http://www.w3.org/2001/10/synthesis" version="1.0" xml:lang="en-US">')
+                    logging.debug("Using SSML: %s", text)
+                    result = synthesizer.speak_ssml_async(text).get()
+                else:
+                    has_properties = any(self.get_property(prop) != "" for prop in ["rate", "volume", "pitch"])
+                    inner_text = self.construct_prosody_tag(text) if has_properties else text
+                    voice_name = self.speech_config.speech_synthesis_voice_name
+                    text = (
+                        '<speak xmlns="http://www.w3.org/2001/10/synthesis" '
+                        'version="1.0" xml:lang="en-US">'
+                        f'<voice name="{voice_name}">{inner_text}</voice></speak>'
+                    )
+                    logging.debug("Final SSML: %s", text)
+                    result = synthesizer.speak_ssml_async(text).get()
+
+                if result.reason == speechsdk_module.ResultReason.SynthesizingAudioCompleted:
+                    audio_data = result.audio_data
+                    if word_timings:
+                        self.timings = word_timings.copy()
+                        self._word_timings = word_timings.copy()
+                    return audio_data
+
+                if result.reason == speechsdk_module.ResultReason.Canceled:
+                    cancellation_details = result.cancellation_details
+                    msg = f"Speech synthesis canceled: {cancellation_details.reason}"
+                    if cancellation_details.reason == speechsdk_module.CancellationReason.Error:
+                        msg = f"Error details: {cancellation_details.error_details}"
+                    raise RuntimeError(msg)
+
+                msg = "Synthesis failed without detailed error message"
+                raise RuntimeError(msg)
+
+            finally:
+                if "synthesizer" in locals():
+                    synthesizer.synthesis_word_boundary.disconnect_all()
+                if restore_voice and original_voice:
+                    self.set_voice(original_voice)
+        finally:
+            self.speech_config.set_speech_synthesis_output_format(default_format_enum)
 
     def get_word_timings(self) -> list[tuple[float, float, str]]:
         """Get word timings directly from the synthesizer.
